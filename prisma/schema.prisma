@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model EFMigrationsHistory {
+  MigrationId    String @id(map: "PK___EFMigrationsHistory") @db.VarChar(150)
+  ProductVersion String @db.VarChar(32)
+
+  @@map("__EFMigrationsHistory")
+}
+
+model order_items {
+  Id                 Int       @id(map: "PK_order_items") @default(autoincrement())
+  OrderId            Int
+  ProductId          Int?
+  Quantity           Int
+  LineTotal          Float
+  Cfop               String    @default("") @db.VarChar(20)
+  Csosn              String    @default("") @db.VarChar(20)
+  Cst                String    @default("") @db.VarChar(20)
+  Ncm                String    @default("") @db.VarChar(30)
+  ProductDescription String    @default("") @db.VarChar(260)
+  ProductItemCode    String    @default("") @db.VarChar(80)
+  ProductReference   String    @default("") @db.VarChar(80)
+  SalePrice          Float     @default(0.0)
+  orders             orders    @relation(fields: [OrderId], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_order_items_orders_OrderId")
+  products           products? @relation(fields: [ProductId], references: [Id], onUpdate: NoAction, map: "FK_order_items_products_ProductId")
+
+  @@index([OrderId], map: "IX_order_items_OrderId")
+  @@index([ProductId], map: "IX_order_items_ProductId")
+}
+
+model orders {
+  Id                Int           @id(map: "PK_orders") @default(autoincrement())
+  CreatedByUserId   Int
+  CreatedByUsername String        @db.VarChar(80)
+  Status            String        @db.VarChar(30)
+  TotalAmount       Float
+  CreatedAtUtc      DateTime      @default(now()) @db.Timestamptz(6)
+  CustomerName      String?       @db.VarChar(120)
+  Observations      String?       @db.VarChar(1000)
+  StoreId           Int
+  order_items       order_items[]
+  stores            stores        @relation(fields: [StoreId], references: [Id], onUpdate: NoAction, map: "FK_orders_stores_StoreId")
+
+  @@index([CreatedAtUtc], map: "IX_orders_CreatedAtUtc")
+  @@index([CreatedByUserId], map: "IX_orders_CreatedByUserId")
+  @@index([StoreId], map: "IX_orders_StoreId")
+}
+
+model products {
+  Id            Int           @id(map: "PK_products") @default(autoincrement())
+  Description   String        @default("") @db.VarChar(260)
+  CreatedAtUtc  DateTime      @default(now()) @db.Timestamptz(6)
+  UpdatedAtUtc  DateTime?     @db.Timestamptz(6)
+  Cfop          String        @default("") @db.VarChar(20)
+  Csosn         String        @default("") @db.VarChar(20)
+  Cst           String        @default("") @db.VarChar(20)
+  ItemCode      String        @default("") @db.VarChar(80)
+  Ncm           String        @default("") @db.VarChar(30)
+  PurchasePrice Float         @default(0.0)
+  Reference     String        @default("") @db.VarChar(80)
+  SalePrice     Float         @default(0.0)
+  StockBalance  Int           @default(0)
+  StoreId       Int
+  ImageKey1     String?       @db.VarChar(512)
+  ImageKey2     String?       @db.VarChar(512)
+  ImageUrl1     String?       @db.VarChar(2048)
+  ImageUrl2     String?       @db.VarChar(2048)
+  order_items   order_items[]
+  stores        stores        @relation(fields: [StoreId], references: [Id], onUpdate: NoAction, map: "FK_products_stores_StoreId")
+
+  @@unique([StoreId, ItemCode], map: "IX_products_StoreId_ItemCode")
+  @@index([Description], map: "IX_products_Description")
+  @@index([Reference], map: "IX_products_Reference")
+  @@index([StoreId], map: "IX_products_StoreId")
+}
+
+model store_users {
+  Id           Int      @id(map: "PK_store_users") @default(autoincrement())
+  StoreId      Int
+  UserId       Int
+  Role         String   @db.VarChar(30)
+  CreatedAtUtc DateTime @default(now()) @db.Timestamptz(6)
+  IsActive     Boolean  @default(true)
+  stores       stores   @relation(fields: [StoreId], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_store_users_stores_StoreId")
+  users        users    @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_store_users_users_UserId")
+
+  @@unique([StoreId, UserId], map: "IX_store_users_StoreId_UserId")
+  @@index([StoreId], map: "IX_store_users_StoreId")
+  @@index([UserId], map: "IX_store_users_UserId")
+}
+
+model stores {
+  Id           Int           @id(map: "PK_stores") @default(autoincrement())
+  Name         String        @db.VarChar(160)
+  Cnpj         String?       @db.VarChar(30)
+  Phone        String?       @db.VarChar(30)
+  Address      String?       @db.VarChar(260)
+  IsActive     Boolean       @default(true)
+  CreatedAtUtc DateTime      @default(now()) @db.Timestamptz(6)
+  orders       orders[]
+  products     products[]
+  store_users  store_users[]
+
+  @@index([Name], map: "IX_stores_Name")
+}
+
+model users {
+  Id                 Int           @id(map: "PK_users") @default(autoincrement())
+  Username           String        @db.VarChar(80)
+  UsernameNormalized String        @unique(map: "IX_users_UsernameNormalized") @db.VarChar(80)
+  PasswordHash       String        @db.VarChar(100)
+  CreatedAtUtc       DateTime      @default(now()) @db.Timestamptz(6)
+  LastLoginAtUtc     DateTime?     @db.Timestamptz(6)
+  Email              String?       @db.VarChar(160)
+  IsActive           Boolean       @default(true)
+  store_users        store_users[]
+}
