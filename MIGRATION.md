@@ -1,12 +1,12 @@
 # Matriz de paridade ASP.NET → NestJS
 
-| Referência ASP.NET | Implementação NestJS |
-| --- | --- |
-| `AuthController` e JWT bearer | `src/auth/auth.controller.ts`, `src/auth/jwt-auth.guard.ts` |
-| `StoresController` e memberships | `src/stores/stores.controller.ts` |
-| `ProductsController`, R2 e XLSX | `src/products/products.controller.ts`, `src/products/product-images.service.ts` |
-| `OrdersController` e transações de estoque | `src/orders/orders.controller.ts`, `src/orders/orders.service.ts` |
-| Entity Framework / PostgreSQL existente | `src/database/database.service.ts` com SQL parametrizado |
+| Referência ASP.NET                         | Implementação NestJS                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------- |
+| `AuthController` e JWT bearer              | `src/auth/auth.controller.ts`, `src/auth/jwt-auth.guard.ts`                     |
+| `StoresController` e memberships           | `src/stores/stores.controller.ts`                                               |
+| `ProductsController`, R2 e XLSX            | `src/products/products.controller.ts`, `src/products/product-images.service.ts` |
+| `OrdersController` e transações de estoque | `src/orders/orders.controller.ts`, `src/orders/orders.service.ts`               |
+| Entity Framework / PostgreSQL existente    | `src/database/database.service.ts` com SQL parametrizado                        |
 
 Decisão: a aplicação NestJS usa o mesmo schema PostgreSQL criado pelas migrations do projeto ASP.NET, sem aplicar migrations próprias. Isso evita alterar silenciosamente dados ou nomes de colunas do banco de referência.
 
