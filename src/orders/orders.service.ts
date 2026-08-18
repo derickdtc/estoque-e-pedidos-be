@@ -118,20 +118,18 @@ export class OrdersService {
     );
     if (typeof filter === 'string')
       return res.status(400).json({ message: filter });
-    const total = Number(
-      (
-        await this.db.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM orders ${filter.where}`,
-          filter.values,
-        )
-      ).rows[0].count,
-    );
-    const orders = (
-      await this.db.query<Order>(
+    const [totalResult, ordersResult] = await Promise.all([
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM orders ${filter.where}`,
+        filter.values,
+      ),
+      this.db.query<Order>(
         `SELECT * FROM orders ${filter.where} ORDER BY "CreatedAtUtc" DESC,"Id" DESC OFFSET $${filter.values.length + 1} LIMIT $${filter.values.length + 2}`,
         [...filter.values, (page - 1) * pageSize, pageSize],
-      )
-    ).rows;
+      ),
+    ]);
+    const total = Number(totalResult.rows[0].count);
+    const orders = ordersResult.rows;
     return res.json({
       page,
       pageSize,
@@ -580,12 +578,28 @@ export class OrdersService {
     }
   }
   private async output(client: { query: PoolClient['query'] }, order: Order) {
+    const items = await this.itemsForOrders(client, [order.Id]);
+    return this.outputWithItems(order, items.get(order.Id) ?? []);
+  }
+  private async itemsForOrders(
+    client: { query: PoolClient['query'] },
+    orderIds: number[],
+  ) {
     const items = (
       await client.query<Item>(
-        'SELECT * FROM order_items WHERE "OrderId"=$1 ORDER BY "ProductDescription"',
-        [order.Id],
+        'SELECT * FROM order_items WHERE "OrderId"=ANY($1::int[]) ORDER BY "OrderId", "ProductDescription"',
+        [orderIds],
       )
     ).rows;
+    const byOrderId = new Map<number, Item[]>();
+    for (const item of items) {
+      const orderItems = byOrderId.get(item.OrderId) ?? [];
+      orderItems.push(item);
+      byOrderId.set(item.OrderId, orderItems);
+    }
+    return byOrderId;
+  }
+  private outputWithItems(order: Order, items: Item[]) {
     return {
       id: order.Id,
       createdAtUtc: responseDate(order.CreatedAtUtc),
@@ -614,7 +628,14 @@ export class OrdersService {
     client: { query: PoolClient['query'] },
     orders: Order[],
   ) {
-    return Promise.all(orders.map((x) => this.output(client, x)));
+    if (!orders.length) return [];
+    const items = await this.itemsForOrders(
+      client,
+      orders.map((order) => order.Id),
+    );
+    return orders.map((order) =>
+      this.outputWithItems(order, items.get(order.Id) ?? []),
+    );
   }
   private catchBusiness(res: Response, error: unknown) {
     if (error instanceof BusinessError)

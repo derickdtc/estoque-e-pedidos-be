@@ -95,20 +95,18 @@ export class ProductsController {
       error = invalidPage(page, pageSize);
     if (error) return res.status(400).json({ message: error });
     const { where, params } = this.searchWhere(request.user!.storeId, search);
-    const total = Number(
-      (
-        await this.db.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM products ${where}`,
-          params,
-        )
-      ).rows[0].count,
-    );
-    const list = (
-      await this.db.query<Product>(
+    const [totalResult, listResult] = await Promise.all([
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM products ${where}`,
+        params,
+      ),
+      this.db.query<Product>(
         `SELECT * FROM products ${where} ORDER BY "Description", "Id" OFFSET $${params.length + 1} LIMIT $${params.length + 2}`,
         [...params, (page - 1) * pageSize, pageSize],
-      )
-    ).rows.map(this.output);
+      ),
+    ]);
+    const total = Number(totalResult.rows[0].count);
+    const list = listResult.rows.map(this.output);
     return res.json({
       page,
       pageSize,
