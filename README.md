@@ -69,6 +69,3 @@ pnpm prisma:validate
 pnpm prisma:studio
 ```
 
-## O que este projeto demonstra
-
-O repositório evidencia experiência prática na construção de APIs para regras de negócio reais: modelagem relacional, controle de acesso, separação por tenant, fluxos transacionais de estoque, integração com armazenamento de imagens e consultas preparadas para maior volume.
