@@ -6,9 +6,9 @@ import {
 } from '@aws-sdk/client-s3';
 import type { Express } from 'express';
 import { DatabaseService } from '../database/database.service';
-import type { Product } from './products.controller';
+import type { ProductRow } from './products.service';
 
-type ProductImageRow = Product;
+type ProductImageRow = ProductRow;
 
 export class ProductImageError extends Error {
   constructor(
@@ -21,6 +21,8 @@ export class ProductImageError extends Error {
 
 @Injectable()
 export class ProductImagesService {
+  private storageClient?: S3Client;
+
   constructor(private readonly db: DatabaseService) {}
 
   async upload(
@@ -98,6 +100,7 @@ export class ProductImagesService {
       );
   }
   private client() {
+    if (this.storageClient) return this.storageClient;
     const accessKeyId =
       process.env.R2_ACCESS_KEY_ID ??
       process.env.R2__AccessKeyId ??
@@ -112,12 +115,13 @@ export class ProductImagesService {
       process.env['R2:Endpoint'];
     if (!accessKeyId || !secretAccessKey || !endpoint)
       throw new Error('R2 storage is not configured.');
-    return new S3Client({
+    this.storageClient = new S3Client({
       endpoint,
       region: 'auto',
       credentials: { accessKeyId, secretAccessKey },
       forcePathStyle: true,
     });
+    return this.storageClient;
   }
   private bucket() {
     const bucket =

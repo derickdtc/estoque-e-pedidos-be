@@ -1,15 +1,4 @@
-import {
-  Body,
-  Injectable,
-  Delete,
-  Get,
-  Param,
-  Post,
-  Put,
-  Query,
-  Req,
-  Res,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import type { Response } from 'express';
 import { PoolClient } from 'pg';
 import { DatabaseService } from '../database/database.service';
@@ -68,14 +57,13 @@ export type OrderRequest = {
 export class OrdersService {
   constructor(private readonly db: DatabaseService) {}
 
-  @Get()
   async list(
-    @Req() request: AuthRequest,
-    @Query('customerName') customerName?: string,
-    @Query('startDate') startDate?: string,
-    @Query('endDate') endDate?: string,
-    @Query('orderIds') orderIds?: string,
-    @Res() res?: Response,
+    request: AuthRequest,
+    customerName?: string,
+    startDate?: string,
+    endDate?: string,
+    orderIds?: string,
+    res?: Response,
   ) {
     const filter = this.filters(
       request.user!.storeId,
@@ -94,16 +82,15 @@ export class OrdersService {
     ).rows;
     return res!.json(await this.outputs(this.db.pool, orders));
   }
-  @Get('paged')
   async paged(
-    @Req() request: AuthRequest,
-    @Query('customerName') customerName: string | undefined,
-    @Query('startDate') startDate: string | undefined,
-    @Query('endDate') endDate: string | undefined,
-    @Query('orderIds') orderIds: string | undefined,
-    @Query('page') rawPage = '1',
-    @Query('pageSize') rawSize = '50',
-    @Res() res: Response,
+    request: AuthRequest,
+    customerName: string | undefined,
+    startDate: string | undefined,
+    endDate: string | undefined,
+    orderIds: string | undefined,
+    rawPage = '1',
+    rawSize = '50',
+    res: Response,
   ) {
     const page = Number(rawPage),
       pageSize = Number(rawSize),
@@ -138,12 +125,7 @@ export class OrdersService {
       items: await this.outputs(this.db.pool, orders),
     });
   }
-  @Post()
-  async create(
-    @Body() body: OrderRequest,
-    @Req() request: AuthRequest,
-    @Res() res: Response,
-  ) {
+  async create(body: OrderRequest, request: AuthRequest, res: Response) {
     const checked = this.validate(body);
     if (typeof checked === 'string')
       return res.status(400).json({ message: checked });
@@ -157,66 +139,78 @@ export class OrdersService {
       return res.status(400).json({
         message: 'As observacoes devem ter no maximo 1000 caracteres.',
       });
-    const order = await this.db.transaction(async (client) => {
-      const ids = checked.map((i) => i.productId);
-      const products = (
-        await client.query<Product>(
-          'SELECT * FROM products WHERE "StoreId"=$1 AND "Id" = ANY($2::int[])',
-          [request.user!.storeId, ids],
-        )
-      ).rows;
-      const map = new Map(products.map((p) => [p.Id, p]));
-      const created = (
-        await client.query<Order>(
-          'INSERT INTO orders ("StoreId","CreatedByUserId","CreatedByUsername","CustomerName","Observations","Status","TotalAmount","CreatedAtUtc") VALUES ($1,$2,$3,$4,$5,$6,0,NOW()) RETURNING *',
-          [
-            request.user!.storeId,
-            request.user!.userId,
-            request.user!.username,
-            customerName,
-            observations,
-            'created',
-          ],
-        )
-      ).rows[0];
-      let total = 0;
-      for (const input of checked) {
-        const p = map.get(input.productId);
-        if (!p)
+    let order: Order;
+    try {
+      order = await this.db.serializable(async (client) => {
+        const ids = checked.map((i) => i.productId);
+        const products = (
+          await client.query<Product>(
+            'SELECT * FROM products WHERE "StoreId"=$1 AND "Id" = ANY($2::int[]) FOR UPDATE',
+            [request.user!.storeId, ids],
+          )
+        ).rows;
+        const map = new Map(products.map((p) => [p.Id, p]));
+        const missing = checked.filter((item) => !map.has(item.productId));
+        if (missing.length)
           throw new BusinessError(
             'Um dos produtos selecionados nao esta disponivel.',
           );
-        const price = input.salePrice ?? Number(p.SalePrice),
-          line = input.quantity * price;
-        await client.query(
-          'UPDATE products SET "StockBalance"="StockBalance"-$1,"UpdatedAtUtc"=NOW() WHERE "Id"=$2',
-          [input.quantity, p.Id],
+        const insufficient = checked.find(
+          (item) => map.get(item.productId)!.StockBalance < item.quantity,
         );
-        await this.insertItem(
+        if (insufficient) {
+          const product = map.get(insufficient.productId)!;
+          throw new BusinessError(
+            `Estoque insuficiente para ${product.Description}. Disponivel: ${product.StockBalance}.`,
+          );
+        }
+        const created = (
+          await client.query<Order>(
+            'INSERT INTO orders ("StoreId","CreatedByUserId","CreatedByUsername","CustomerName","Observations","Status","TotalAmount","CreatedAtUtc") VALUES ($1,$2,$3,$4,$5,$6,0,NOW()) RETURNING *',
+            [
+              request.user!.storeId,
+              request.user!.userId,
+              request.user!.username,
+              customerName,
+              observations,
+              'created',
+            ],
+          )
+        ).rows[0];
+        let total = 0;
+        const itemRows = checked.map((input) => {
+          const p = map.get(input.productId)!;
+          const price = input.salePrice ?? Number(p.SalePrice),
+            line = input.quantity * price;
+          total += line;
+          return { product: p, quantity: input.quantity, price, line };
+        });
+        await this.applyStockDeltas(
           client,
-          created.Id,
-          p,
-          input.quantity,
-          price,
-          line,
+          request.user!.storeId,
+          checked.map((item) => ({
+            productId: item.productId,
+            delta: item.quantity,
+          })),
         );
-        total += line;
-      }
-      return (
-        await client.query<Order>(
-          'UPDATE orders SET "TotalAmount"=$1 WHERE "Id"=$2 RETURNING *',
-          [total, created.Id],
-        )
-      ).rows[0];
-    });
+        await this.insertItems(client, created.Id, itemRows);
+        return (
+          await client.query<Order>(
+            'UPDATE orders SET "TotalAmount"=$1 WHERE "Id"=$2 RETURNING *',
+            [total, created.Id],
+          )
+        ).rows[0];
+      });
+    } catch (error) {
+      return this.catchBusiness(res, error);
+    }
     return res.status(201).json(await this.output(this.db.pool, order));
   }
-  @Put(':id')
   async update(
-    @Param('id') rawId: string,
-    @Body() body: OrderRequest,
-    @Req() request: AuthRequest,
-    @Res() res: Response,
+    rawId: string,
+    body: OrderRequest,
+    request: AuthRequest,
+    res: Response,
   ) {
     if (!body)
       return res
@@ -236,7 +230,7 @@ export class OrdersService {
         message: 'As observacoes devem ter no maximo 1000 caracteres.',
       });
     try {
-      const order = await this.db.transaction(async (client) => {
+      const order = await this.db.serializable(async (client) => {
         const id = Number(rawId),
           storeId = request.user!.storeId;
         const order = (
@@ -260,23 +254,31 @@ export class OrdersService {
             ...old.flatMap((x) => (x.ProductId ? [x.ProductId] : [])),
           ]),
         ];
+        const legacyItemCodes = [
+          ...new Set(
+            old
+              .filter((item) => !item.ProductId)
+              .map((item) => item.ProductItemCode.toLowerCase()),
+          ),
+        ];
         const products = (
           await client.query<Product>(
-            'SELECT * FROM products WHERE "StoreId"=$1 AND "Id"=ANY($2::int[]) FOR UPDATE',
-            [storeId, allIds],
+            'SELECT * FROM products WHERE "StoreId"=$1 AND ("Id"=ANY($2::int[]) OR LOWER("ItemCode")=ANY($3::text[])) FOR UPDATE',
+            [storeId, allIds, legacyItemCodes],
           )
         ).rows;
         const map = new Map(products.map((p) => [p.Id, p]));
+        const mapByCode = new Map(
+          products.map((product) => [
+            product.ItemCode.toLowerCase(),
+            product.Id,
+          ]),
+        );
         const oldQty = new Map<number, number>();
         for (const item of old) {
           let pid = item.ProductId;
           if (!pid) {
-            pid =
-              products.find(
-                (p) =>
-                  p.ItemCode.toLowerCase() ===
-                  item.ProductItemCode.toLowerCase(),
-              )?.Id ?? null;
+            pid = mapByCode.get(item.ProductItemCode.toLowerCase()) ?? null;
             if (!pid)
               throw new BusinessError(
                 `Nao foi possivel localizar o produto antigo ${item.ProductItemCode} para editar o pedido.`,
@@ -297,6 +299,7 @@ export class OrdersService {
         const requested = new Map(
           checked.map((x) => [x.productId, x.quantity]),
         );
+        const deltas: Array<{ productId: number; delta: number }> = [];
         for (const pid of new Set([...oldQty.keys(), ...requested.keys()])) {
           const delta = (requested.get(pid) ?? 0) - (oldQty.get(pid) ?? 0),
             product = map.get(pid);
@@ -308,21 +311,19 @@ export class OrdersService {
             throw new BusinessError(
               `Estoque insuficiente para ${product.Description}. Disponivel: ${product.StockBalance}. Necessario adicional: ${delta}.`,
             );
-          if (delta)
-            await client.query(
-              'UPDATE products SET "StockBalance"="StockBalance"-$1,"UpdatedAtUtc"=NOW() WHERE "Id"=$2',
-              [delta, pid],
-            );
+          if (delta) deltas.push({ productId: pid, delta });
         }
+        await this.applyStockDeltas(client, storeId, deltas);
         await client.query('DELETE FROM order_items WHERE "OrderId"=$1', [id]);
         let total = 0;
-        for (const input of checked) {
+        const itemRows = checked.map((input) => {
           const p = map.get(input.productId)!;
           const price = input.salePrice ?? Number(p.SalePrice),
             line = input.quantity * price;
-          await this.insertItem(client, id, p, input.quantity, price, line);
           total += line;
-        }
+          return { product: p, quantity: input.quantity, price, line };
+        });
+        await this.insertItems(client, id, itemRows);
         return (
           await client.query<Order>(
             'UPDATE orders SET "CustomerName"=$1,"Observations"=$2,"TotalAmount"=$3 WHERE "Id"=$4 RETURNING *',
@@ -335,14 +336,9 @@ export class OrdersService {
       return this.catchBusiness(res, error);
     }
   }
-  @Post(':id/edit')
-  async edit(
-    @Param('id') rawId: string,
-    @Req() request: AuthRequest,
-    @Res() res: Response,
-  ) {
+  async edit(rawId: string, request: AuthRequest, res: Response) {
     try {
-      const order = await this.db.transaction(async (client) => {
+      const order = await this.db.serializable(async (client) => {
         const found = (
           await client.query<Order>(
             'SELECT * FROM orders WHERE "Id"=$1 AND "StoreId"=$2 FOR UPDATE',
@@ -352,7 +348,7 @@ export class OrdersService {
         if (!found) throw new BusinessError('Pedido nao encontrado.', 404);
         if (found.Status.toLowerCase() !== 'created')
           throw new BusinessError('Este pedido nao pode mais ser editado.');
-        await this.restore(client, found.Id, request.user!.storeId);
+        await this.restore(client, [found.Id], request.user!.storeId);
         return (
           await client.query<Order>(
             'UPDATE orders SET "Status"=$1 WHERE "Id"=$2 RETURNING *',
@@ -365,11 +361,10 @@ export class OrdersService {
       return this.catchBusiness(res, error);
     }
   }
-  @Delete()
   async remove(
-    @Body() body: { orderIds?: number[] },
-    @Req() request: AuthRequest,
-    @Res() res: Response,
+    body: { orderIds?: number[] },
+    request: AuthRequest,
+    res: Response,
   ) {
     const input = body?.orderIds;
     if (!input?.length)
@@ -382,7 +377,7 @@ export class OrdersService {
         message: 'A lista de pedidos contem ids invalidos ou repetidos.',
       });
     try {
-      await this.db.transaction(async (client) => {
+      await this.db.serializable(async (client) => {
         const orders = (
           await client.query<Order>(
             'SELECT * FROM orders WHERE "StoreId"=$1 AND "Id"=ANY($2::int[]) FOR UPDATE',
@@ -404,8 +399,11 @@ export class OrdersService {
             400,
             { orderIds: blocked },
           );
-        for (const order of orders)
-          await this.restore(client, order.Id, request.user!.storeId);
+        await this.restore(
+          client,
+          orders.map((order) => order.Id),
+          request.user!.storeId,
+        );
         await client.query(
           'UPDATE orders SET "Status"=$1 WHERE "Id"=ANY($2::int[])',
           ['deleted', ids],
@@ -416,12 +414,7 @@ export class OrdersService {
       return this.catchBusiness(res, error);
     }
   }
-  @Get(':id')
-  async byId(
-    @Param('id') rawId: string,
-    @Req() request: AuthRequest,
-    @Res() res: Response,
-  ) {
+  async byId(rawId: string, request: AuthRequest, res: Response) {
     const order = (
       await this.db.query<Order>(
         'SELECT * FROM orders WHERE "Id"=$1 AND "StoreId"=$2 LIMIT 1',
@@ -516,66 +509,120 @@ export class OrdersService {
     }
     return [...by.values()];
   }
-  private async insertItem(
+  private async insertItems(
     client: PoolClient,
     orderId: number,
-    p: Product,
-    quantity: number,
-    price: number,
-    line: number,
+    items: Array<{
+      product: Product;
+      quantity: number;
+      price: number;
+      line: number;
+    }>,
   ) {
+    if (!items.length) return;
     await client.query(
-      'INSERT INTO order_items ("OrderId","ProductId","ProductItemCode","ProductDescription","ProductReference","Cfop","Csosn","Ncm","Cst","Quantity","SalePrice","LineTotal") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
+      `INSERT INTO order_items ("OrderId","ProductId","ProductItemCode","ProductDescription","ProductReference","Cfop","Csosn","Ncm","Cst","Quantity","SalePrice","LineTotal")
+       SELECT $1,x."productId",x."itemCode",x."description",x."reference",x."cfop",x."csosn",x."ncm",x."cst",x."quantity",x."price",x."line"
+       FROM jsonb_to_recordset($2::jsonb) AS x("productId" integer,"itemCode" text,"description" text,"reference" text,"cfop" text,"csosn" text,"ncm" text,"cst" text,"quantity" integer,"price" double precision,"line" double precision)`,
       [
         orderId,
-        p.Id,
-        p.ItemCode,
-        p.Description,
-        p.Reference,
-        p.Cfop,
-        p.Csosn,
-        p.Ncm,
-        p.Cst,
-        quantity,
-        price,
-        line,
+        JSON.stringify(
+          items.map(({ product, quantity, price, line }) => ({
+            productId: product.Id,
+            itemCode: product.ItemCode,
+            description: product.Description,
+            reference: product.Reference,
+            cfop: product.Cfop,
+            csosn: product.Csosn,
+            ncm: product.Ncm,
+            cst: product.Cst,
+            quantity,
+            price,
+            line,
+          })),
+        ),
       ],
     );
   }
-  private async restore(client: PoolClient, orderId: number, storeId: number) {
+
+  private async applyStockDeltas(
+    client: PoolClient,
+    storeId: number,
+    deltas: Array<{ productId: number; delta: number }>,
+  ) {
+    if (!deltas.length) return;
+    await client.query(
+      `UPDATE products AS p
+       SET "StockBalance"=p."StockBalance"-x."delta","UpdatedAtUtc"=NOW()
+       FROM jsonb_to_recordset($2::jsonb) AS x("productId" integer,"delta" integer)
+       WHERE p."StoreId"=$1 AND p."Id"=x."productId"`,
+      [storeId, JSON.stringify(deltas)],
+    );
+  }
+
+  private async restore(
+    client: PoolClient,
+    orderIds: number[],
+    storeId: number,
+  ) {
     const items = (
-      await client.query<Item>('SELECT * FROM order_items WHERE "OrderId"=$1', [
-        orderId,
-      ])
+      await client.query<Item>(
+        'SELECT * FROM order_items WHERE "OrderId"=ANY($1::int[])',
+        [orderIds],
+      )
     ).rows;
+    if (!items.length) return;
+    const productIds = [
+      ...new Set(
+        items.flatMap((item) => (item.ProductId ? [item.ProductId] : [])),
+      ),
+    ];
+    const itemCodes = [
+      ...new Set(items.map((item) => item.ProductItemCode.toLowerCase())),
+    ];
+    const products = (
+      await client.query<Product>(
+        'SELECT * FROM products WHERE "StoreId"=$1 AND ("Id"=ANY($2::int[]) OR LOWER("ItemCode")=ANY($3::text[])) FOR UPDATE',
+        [storeId, productIds, itemCodes],
+      )
+    ).rows;
+    const byId = new Map(products.map((product) => [product.Id, product]));
+    const byCode = new Map(
+      products.map((product) => [product.ItemCode.toLowerCase(), product]),
+    );
+    const quantities = new Map<number, number>();
+    const links: Array<{ itemId: number; productId: number }> = [];
     for (const item of items) {
-      let product = (
-        await client.query<Product>(
-          'SELECT * FROM products WHERE "StoreId"=$1 AND "Id"=$2 FOR UPDATE',
-          [storeId, item.ProductId],
-        )
-      ).rows[0];
-      if (!product)
-        product = (
-          await client.query<Product>(
-            'SELECT * FROM products WHERE "StoreId"=$1 AND LOWER("ItemCode")=LOWER($2) FOR UPDATE',
-            [storeId, item.ProductItemCode],
-          )
-        ).rows[0];
+      const product =
+        (item.ProductId ? byId.get(item.ProductId) : undefined) ??
+        byCode.get(item.ProductItemCode.toLowerCase());
       if (!product)
         throw new BusinessError(
           `Nao foi possivel devolver ao estoque o produto ${item.ProductItemCode}.`,
         );
       if (item.ProductId !== product.Id)
-        await client.query(
-          'UPDATE order_items SET "ProductId"=$1 WHERE "Id"=$2',
-          [product.Id, item.Id],
-        );
-      await client.query(
-        'UPDATE products SET "StockBalance"="StockBalance"+$1,"UpdatedAtUtc"=NOW() WHERE "Id"=$2',
-        [item.Quantity, product.Id],
+        links.push({ itemId: item.Id, productId: product.Id });
+      quantities.set(
+        product.Id,
+        (quantities.get(product.Id) ?? 0) + item.Quantity,
       );
     }
+    if (links.length) {
+      await client.query(
+        `UPDATE order_items AS i SET "ProductId"=x."productId"
+         FROM jsonb_to_recordset($1::jsonb) AS x("itemId" integer,"productId" integer)
+         WHERE i."Id"=x."itemId"`,
+        [JSON.stringify(links)],
+      );
+    }
+    await this.applyStockDeltas(
+      client,
+      storeId,
+      [...quantities].map(([productId, quantity]) => ({
+        productId,
+        delta: -quantity,
+      })),
+    );
   }
   private async output(client: { query: PoolClient['query'] }, order: Order) {
     const items = await this.itemsForOrders(client, [order.Id]);
