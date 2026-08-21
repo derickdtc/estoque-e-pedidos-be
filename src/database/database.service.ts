@@ -53,9 +53,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.pool.query<T>(text, values);
   }
   async transaction<T>(work: (client: PoolClient) => Promise<T>) {
+    return this.runTransaction('READ COMMITTED', work);
+  }
+  async serializable<T>(work: (client: PoolClient) => Promise<T>) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.runTransaction('SERIALIZABLE', work);
+      } catch (error) {
+        if (attempt >= 2 || !this.isSerializationFailure(error)) throw error;
+      }
+    }
+  }
+  private async runTransaction<T>(
+    isolation: 'READ COMMITTED' | 'SERIALIZABLE',
+    work: (client: PoolClient) => Promise<T>,
+  ) {
     const client = await this.pool.connect();
     try {
-      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+      await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
       const result = await work(client);
       await client.query('COMMIT');
       return result;
@@ -65,6 +80,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     } finally {
       client.release();
     }
+  }
+  private isSerializationFailure(error: unknown) {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === '40001'
+    );
   }
   private async seed() {
     const username =
