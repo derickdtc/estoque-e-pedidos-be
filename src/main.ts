@@ -49,6 +49,7 @@ async function bootstrap() {
   app.use('/health', (_req: Request, res: Response) =>
     res.status(200).json({ status: 'ok' }),
   );
-  await app.listen(process.env.PORT ?? 3006);
+  const port = Number(process.env.PORT ?? 3006);
+  await app.listen(port, '0.0.0.0');
 }
 void bootstrap();

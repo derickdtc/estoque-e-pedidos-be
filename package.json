@@ -6,6 +6,8 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
+    "prebuild": "prisma generate",
+    "prestart": "prisma generate",
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "start": "nest start",
@@ -32,6 +34,7 @@
     "@nestjs/swagger": "^11.4.6",
     "@prisma/client": "^6.19.2",
     "bcrypt": "^6.0.0",
+    "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "pg": "^8.23.0",

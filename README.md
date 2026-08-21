@@ -69,11 +69,3 @@ pnpm prisma:validate
 pnpm prisma:studio
 ```
 
-Para bancos com catalogos ou historicos grandes, aplique uma vez os indices de
-[`database/performance-indexes.sql`](database/performance-indexes.sql). O script
-e opt-in porque as migrations continuam sob responsabilidade do projeto
-ASP.NET. Veja tambem [`ARCHITECTURE_AUDIT.md`](ARCHITECTURE_AUDIT.md).
-
-## O que este projeto demonstra
-
-O repositório evidencia experiência prática na construção de APIs para regras de negócio reais: modelagem relacional, controle de acesso, separação por tenant, fluxos transacionais de estoque, integração com armazenamento de imagens e consultas preparadas para maior volume.
